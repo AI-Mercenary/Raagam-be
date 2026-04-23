@@ -7,12 +7,12 @@ const serviceAccountPath = path.join(__dirname, '../../serviceAccountKey.json');
 
 try {
     let serviceAccount;
-    if (process.env.FIREBASE_CREDENTIALS) {
-        let rawStr = process.env.FIREBASE_CREDENTIALS;
-        if (!rawStr.includes('{')) {
-            rawStr = Buffer.from(rawStr, 'base64').toString('utf8');
-        }
-        serviceAccount = JSON.parse(rawStr);
+    if (process.env.FIREBASE_PRIVATE_KEY_BASE6 || process.env.FIREBASE_PRIVATE_KEY_BASE64) {
+        serviceAccount = {
+            projectId: "raagam-msc",
+            clientEmail: "firebase-adminsdk-fbsvc@raagam-msc.iam.gserviceaccount.com",
+            privateKey: Buffer.from((process.env.FIREBASE_PRIVATE_KEY_BASE6 || process.env.FIREBASE_PRIVATE_KEY_BASE64), 'base64').toString('utf8')
+        };
     } else {
         serviceAccount = require(serviceAccountPath);
     }
