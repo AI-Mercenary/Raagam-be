@@ -1,11 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const fs = require('fs');
+const path = require('path');
 const yts = require('yt-search');
-const youtubedl = require('youtube-dl-exec');
+const ytdl = require('@distube/ytdl-core');
+const playdl = require('play-dl');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const path = require('path');
 const { db } = require('../config/firebase-admin');
 
 // GET: /api/scrape/search?q=query  — searches yt-dlp (audio/music focus)
@@ -51,51 +52,61 @@ function formatDuration(seconds) {
 router.get('/stream/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const binaryPath = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
-        
-        console.log(`[STREAM] Final attempt for ID: ${id}`);
+        const url = `https://www.youtube.com/watch?v=${id}`;
+        console.log(`[STREAM] Extracting: ${id}`);
 
-        // Provider 1: Local Binary
+        // Provider 1: @distube/ytdl-core (pure Node.js, no binary)
         try {
-            const streamInfo = await youtubedl(`https://www.youtube.com/watch?v=${id}`, {
-                dumpJson: true, noCheckCertificates: true, noWarnings: true, format: 'bestaudio',
-                executablePath: binaryPath
-            });
-            if (streamInfo?.url) return res.json({ title: streamInfo.title, streamUrl: streamInfo.url, expiryInMs: 0 });
-        } catch (e) { console.warn(`P1 Fail: ${e.message}`); }
+            const info = await ytdl.getInfo(url);
+            const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
+            if (format?.url) {
+                console.log(`[P1 SUCCESS] Got stream via ytdl-core`);
+                return res.json({ title: info.videoDetails.title, streamUrl: format.url, expiryInMs: 0 });
+            }
+        } catch (e) { console.warn(`[P1 FAIL] ytdl-core: ${e.message}`); }
 
-        // Provider 2: Cobalt API
+        // Provider 2: play-dl (pure Node.js, no binary)
         try {
-            const fallback = await axios.post('https://api.cobalt.tools/api/json', {
-                url: `https://www.youtube.com/watch?v=${id}`, downloadMode: 'audio', audioFormat: 'mp3'
-            }, { timeout: 5000 });
-            if (fallback.data?.url) return res.json({ title: `Stream_${id}`, streamUrl: fallback.data.url, expiryInMs: 0 });
-        } catch (e) { console.warn(`P2 Fail: ${e.message}`); }
+            const streamInfo = await playdl.stream(url, { quality: 2 });
+            const ytInfo = await playdl.video_info(url);
+            if (streamInfo?.stream) {
+                // play-dl gives us a readable stream — we need the URL from video_info
+                const audioFormat = ytInfo?.format?.find(f => f.mimeType?.includes('audio'));
+                if (audioFormat?.url) {
+                    console.log(`[P2 SUCCESS] Got stream via play-dl`);
+                    return res.json({ title: ytInfo.video_details.title, streamUrl: audioFormat.url, expiryInMs: 0 });
+                }
+            }
+        } catch (e) { console.warn(`[P2 FAIL] play-dl: ${e.message}`); }
 
-        // Provider 3: Backup Extraction Pipe (Simple & Direct)
+        // Provider 3: Public Invidious Instance API
         try {
-            const backup = await axios.get(`https://invidious.snopyta.org/api/v1/videos/${id}`);
-            const format = backup.data?.adaptiveFormats?.find(f => f.type.includes('audio')) || backup.data?.formatStreams?.[0];
-            if (format?.url) return res.json({ title: backup.data.title || id, streamUrl: format.url, expiryInMs: 0 });
-        } catch (e) { console.warn(`P3 Fail: ${e.message}`); }
+            const instances = ['https://invidious.tiekoetter.com', 'https://invidious.projectsegfau.lt', 'https://yt.artemislena.eu'];
+            for (const instance of instances) {
+                try {
+                    const data = await axios.get(`${instance}/api/v1/videos/${id}`, { timeout: 5000 });
+                    const fmt = data.data?.adaptiveFormats?.find(f => f.type?.includes('audio/webm') || f.type?.includes('audio/mp4'))
+                              || data.data?.formatStreams?.[0];
+                    if (fmt?.url) {
+                        console.log(`[P3 SUCCESS] Got stream via ${instance}`);
+                        return res.json({ title: data.data.title || id, streamUrl: fmt.url, expiryInMs: 0 });
+                    }
+                } catch (_) {}
+            }
+        } catch (e) { console.warn(`[P3 FAIL] Invidious: ${e.message}`); }
 
-        throw new Error('All 3 stream providers failed to extract audio.');
+        throw new Error('All stream providers exhausted.');
     } catch (err) {
-        console.error('CRITICAL EXTRACTION FAILURE:', err.message);
+        console.error('[STREAM CRITICAL]', err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
-// Diagnostic Route: Check server health and binary existence
+// Diagnostic Route
 router.get('/debug/status', async (req, res) => {
-    const binaryPath = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
-    res.json({
-        time: new Date().toISOString(),
-        binaryExists: fs.existsSync(binaryPath),
-        nodeVersion: process.version,
-        platform: process.platform
-    });
+    res.json({ time: new Date().toISOString(), nodeVersion: process.version, platform: process.platform, status: 'ok' });
 });
+
 
 // GET: /api/scrape/naasongs?q=movie name
 router.get('/naasongs', async (req, res) => {
