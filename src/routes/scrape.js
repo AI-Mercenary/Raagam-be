@@ -53,67 +53,113 @@ router.get('/stream/:id', async (req, res) => {
     const { id } = req.params;
     console.log(`[STREAM] Extracting: ${id}`);
 
-    // Piped API instances — open-source YouTube proxy, no bot detection
-    const pipedInstances = [
-        'https://pipedapi.kavin.rocks',
-        'https://pipedapi.adminforge.de',
-        'https://piped-api.garudalinux.org',
-        'https://api.piped.yt',
-    ];
-
-    for (const instance of pipedInstances) {
-        try {
-            const { data } = await axios.get(`${instance}/streams/${id}`, {
-                timeout: 8000,
-                headers: { 'Referer': 'https://music.youtube.com/' }
-            });
-            const audio = data?.audioStreams?.sort((a, b) => b.bitrate - a.bitrate)?.[0];
-            if (audio?.url) {
-                console.log(`[SUCCESS] Stream via ${instance}`);
-                return res.json({ title: data.title || id, streamUrl: audio.url, expiryInMs: 0 });
+    // METHOD 1: YouTube Internal Player API — Android Music Client
+    // This is what the real YouTube Music app uses. No bot detection.
+    try {
+        const ytMusicResponse = await axios.post(
+            'https://www.youtube.com/youtubei/v1/player',
+            {
+                videoId: id,
+                context: {
+                    client: {
+                        clientName: 'ANDROID_MUSIC',
+                        clientVersion: '5.29.52',
+                        androidSdkVersion: 30,
+                        hl: 'en',
+                        gl: 'US'
+                    }
+                }
+            },
+            {
+                params: { key: 'AIzaSyAOghZGza2MQSZkY_zfiqTmuDAFqKOf_oE' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'com.google.android.apps.youtube.music/5.29.52 (Linux; U; Android 11) gzip',
+                    'X-YouTube-Client-Name': '21',
+                    'X-YouTube-Client-Version': '5.29.52'
+                },
+                timeout: 10000
             }
-        } catch (e) {
-            console.warn(`[FAIL] ${instance}: ${e.message}`);
+        );
+
+        const streamingData = ytMusicResponse.data?.streamingData;
+        const formats = [
+            ...(streamingData?.adaptiveFormats || []),
+            ...(streamingData?.formats || [])
+        ];
+
+        // Get best audio-only stream
+        const audioFormats = formats
+            .filter(f => f.mimeType?.includes('audio') && f.url)
+            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+
+        if (audioFormats.length > 0) {
+            const best = audioFormats[0];
+            const title = ytMusicResponse.data?.videoDetails?.title || id;
+            console.log(`[SUCCESS] YouTube Music internal API — ${title}`);
+            return res.json({ title, streamUrl: best.url, expiryInMs: 0 });
         }
+    } catch (e) {
+        console.warn(`[FAIL] YT Internal API: ${e.message}`);
     }
 
-    // Last resort: Invidious instances
-    const invidiousInstances = [
-        'https://invidious.tiekoetter.com',
-        'https://invidious.projectsegfau.lt',
-        'https://invidious.privacyredirect.com',
-    ];
-
-    for (const instance of invidiousInstances) {
-        try {
-            const { data } = await axios.get(`${instance}/api/v1/videos/${id}`, { timeout: 6000 });
-            const fmt = data?.adaptiveFormats?.find(f => f.type?.includes('audio'))
-                      || data?.formatStreams?.[0];
-            if (fmt?.url) {
-                console.log(`[SUCCESS] Stream via ${instance}`);
-                return res.json({ title: data.title || id, streamUrl: fmt.url, expiryInMs: 0 });
+    // METHOD 2: ANDROID client fallback (less music-specific but reliable)
+    try {
+        const androidResponse = await axios.post(
+            'https://www.youtube.com/youtubei/v1/player',
+            {
+                videoId: id,
+                context: {
+                    client: {
+                        clientName: 'ANDROID',
+                        clientVersion: '17.31.35',
+                        androidSdkVersion: 30
+                    }
+                }
+            },
+            {
+                params: { key: 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w' },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip'
+                },
+                timeout: 10000
             }
-        } catch (e) {
-            console.warn(`[FAIL] ${instance}: ${e.message}`);
-        }
-    }
+        );
 
+        const formats2 = [
+            ...(androidResponse.data?.streamingData?.adaptiveFormats || []),
+            ...(androidResponse.data?.streamingData?.formats || [])
+        ].filter(f => f.mimeType?.includes('audio') && f.url)
+         .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+
+        if (formats2.length > 0) {
+            const title = androidResponse.data?.videoDetails?.title || id;
+            console.log(`[SUCCESS] YouTube Android client fallback — ${title}`);
+            return res.json({ title, streamUrl: formats2[0].url, expiryInMs: 0 });
+        }
+    } catch (e) {
+        console.warn(`[FAIL] Android fallback: ${e.message}`);
+    }
 
     console.error('[STREAM] All providers exhausted for:', id);
-    res.status(500).json({ error: 'Could not extract stream from any provider' });
+    res.status(500).json({ error: 'Could not extract audio stream' });
 });
 
 // Diagnostic Route
 router.get('/debug/status', async (req, res) => {
-    // Quick test of primary piped instance
     try {
-        const test = await axios.get('https://pipedapi.kavin.rocks/streams/dQw4w9WgXcQ', { timeout: 5000 });
-        const ok = !!test.data?.audioStreams?.length;
-        res.json({ time: new Date().toISOString(), pipedWorking: ok, platform: process.platform });
+        const r = await axios.post('https://www.youtube.com/youtubei/v1/player',
+            { videoId: 'dQw4w9WgXcQ', context: { client: { clientName: 'ANDROID_MUSIC', clientVersion: '5.29.52' } } },
+            { params: { key: 'AIzaSyAOghZGza2MQSZkY_zfiqTmuDAFqKOf_oE' }, timeout: 5000 }
+        );
+        const works = !!(r.data?.streamingData?.adaptiveFormats?.length);
+        res.json({ time: new Date().toISOString(), ytMusicApiWorks: works, platform: process.platform });
     } catch(e) {
-        res.json({ time: new Date().toISOString(), pipedWorking: false, error: e.message });
+        res.json({ time: new Date().toISOString(), ytMusicApiWorks: false, error: e.message });
     }
 });
+
 
 
 
