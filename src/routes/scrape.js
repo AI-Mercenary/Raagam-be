@@ -52,29 +52,54 @@ router.get('/stream/:id', async (req, res) => {
         const { id } = req.params;
         const binaryPath = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
         
-        console.log(`Extracting stream for ID: ${id} using binary: ${binaryPath}`);
-        
-        const streamInfo = await youtubedl(`https://music.youtube.com/watch?v=${id}`, {
-            dumpJson: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            format: 'bestaudio',
-            executablePath: binaryPath // FORCE the use of our manual download
-        });
-        
-        if (!streamInfo || !streamInfo.url) {
-            console.error('Extraction failed: No URL in streamInfo');
-            return res.status(404).json({ error: 'Audio stream extraction returned empty' });
+        console.log(`[STREAM] Attempting extraction for ID: ${id}`);
+
+        try {
+            // Attempt 1: Local yt-dlp
+            const streamInfo = await youtubedl(`https://www.youtube.com/watch?v=${id}`, {
+                dumpJson: true,
+                noCheckCertificates: true,
+                noWarnings: true,
+                format: 'bestaudio',
+                executablePath: binaryPath
+            });
+
+            if (streamInfo && streamInfo.url) {
+                console.log(`[STREAM] Local success for ${id}`);
+                return res.json({ 
+                    title: streamInfo.title,
+                    streamUrl: streamInfo.url,
+                    expiryInMs: 0 
+                });
+            }
+        } catch (localErr) {
+            console.warn(`[STREAM] Local extraction failed for ${id}, trying fallback...`);
         }
-        
-        res.json({ 
-            title: streamInfo.title || `Stream_for_${id}`,
-            streamUrl: streamInfo.url,
-            expiryInMs: 0 
+
+        // Attempt 2: Public High-Reliability Fallback Proxy
+        // We use cobalt.tools instance or similar public API for extraction
+        const fallbackResponse = await axios.post('https://api.cobalt.tools/api/json', {
+            url: `https://www.youtube.com/watch?v=${id}`,
+            downloadMode: 'audio',
+            audioFormat: 'mp3'
+        }, {
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' }
         });
+
+        if (fallbackResponse.data && fallbackResponse.data.url) {
+            console.log(`[STREAM] Fallback success for ${id}`);
+            return res.json({
+                title: `Stream_${id}`,
+                streamUrl: fallbackResponse.data.url,
+                expiryInMs: 0
+            });
+        }
+
+        throw new Error('All extraction methods failed');
+
     } catch (err) {
-        console.error('Streaming Extraction Error DETAILS:', err);
-        res.status(500).json({ error: 'Extraction engine failure. Check logs.' });
+        console.error('Streaming Extraction Error DETAILS:', err.message);
+        res.status(500).json({ error: 'Failed to extract audio stream from all providers' });
     }
 });
 
