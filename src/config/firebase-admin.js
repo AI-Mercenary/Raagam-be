@@ -6,13 +6,19 @@ const path = require('path');
 const serviceAccountPath = path.join(__dirname, '../../serviceAccountKey.json');
 
 try {
-    const serviceAccount = require(serviceAccountPath);
+    let serviceAccount;
+    if (process.env.FIREBASE_CREDENTIALS) {
+        serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+    } else {
+        serviceAccount = require(serviceAccountPath);
+    }
+    
     admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
     });
     console.log("Firebase Admin initialized successfully.");
 } catch (err) {
-    console.error("Firebase Admin initialization FAILED. Please ensure 'serviceAccountKey.json' exists in the backend root.");
+    console.error("Firebase Admin initialization FAILED. Please ensure 'serviceAccountKey.json' exists or FIREBASE_CREDENTIALS is set.", err.message);
 }
 
 const db = admin.firestore();
