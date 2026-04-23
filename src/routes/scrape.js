@@ -15,8 +15,8 @@ router.get('/search', async (req, res) => {
         const { q } = req.query;
         if (!q) return res.status(400).json({ error: 'Query required' });
 
-        // Use yt-search (much faster and more reliable for simple search lists)
-        const result = await yts(`${q} audio topic`);
+        // Use yt-search biased toward YouTube Music Topic channels
+        const result = await yts(`${q} music topic`);
         const entries = result.videos || [];
         
         const mapped = entries
@@ -50,62 +50,71 @@ function formatDuration(seconds) {
 
 // GET: /api/scrape/stream/:id
 router.get('/stream/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const url = `https://www.youtube.com/watch?v=${id}`;
-        console.log(`[STREAM] Extracting: ${id}`);
+    const { id } = req.params;
+    console.log(`[STREAM] Extracting: ${id}`);
 
-        // Provider 1: @distube/ytdl-core (pure Node.js, no binary)
+    // Piped API instances — open-source YouTube proxy, no bot detection
+    const pipedInstances = [
+        'https://pipedapi.kavin.rocks',
+        'https://pipedapi.adminforge.de',
+        'https://piped-api.garudalinux.org',
+        'https://api.piped.yt',
+    ];
+
+    for (const instance of pipedInstances) {
         try {
-            const info = await ytdl.getInfo(url);
-            const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' });
-            if (format?.url) {
-                console.log(`[P1 SUCCESS] Got stream via ytdl-core`);
-                return res.json({ title: info.videoDetails.title, streamUrl: format.url, expiryInMs: 0 });
+            const { data } = await axios.get(`${instance}/streams/${id}`, {
+                timeout: 8000,
+                headers: { 'Referer': 'https://music.youtube.com/' }
+            });
+            const audio = data?.audioStreams?.sort((a, b) => b.bitrate - a.bitrate)?.[0];
+            if (audio?.url) {
+                console.log(`[SUCCESS] Stream via ${instance}`);
+                return res.json({ title: data.title || id, streamUrl: audio.url, expiryInMs: 0 });
             }
-        } catch (e) { console.warn(`[P1 FAIL] ytdl-core: ${e.message}`); }
-
-        // Provider 2: play-dl (pure Node.js, no binary)
-        try {
-            const streamInfo = await playdl.stream(url, { quality: 2 });
-            const ytInfo = await playdl.video_info(url);
-            if (streamInfo?.stream) {
-                // play-dl gives us a readable stream — we need the URL from video_info
-                const audioFormat = ytInfo?.format?.find(f => f.mimeType?.includes('audio'));
-                if (audioFormat?.url) {
-                    console.log(`[P2 SUCCESS] Got stream via play-dl`);
-                    return res.json({ title: ytInfo.video_details.title, streamUrl: audioFormat.url, expiryInMs: 0 });
-                }
-            }
-        } catch (e) { console.warn(`[P2 FAIL] play-dl: ${e.message}`); }
-
-        // Provider 3: Public Invidious Instance API
-        try {
-            const instances = ['https://invidious.tiekoetter.com', 'https://invidious.projectsegfau.lt', 'https://yt.artemislena.eu'];
-            for (const instance of instances) {
-                try {
-                    const data = await axios.get(`${instance}/api/v1/videos/${id}`, { timeout: 5000 });
-                    const fmt = data.data?.adaptiveFormats?.find(f => f.type?.includes('audio/webm') || f.type?.includes('audio/mp4'))
-                              || data.data?.formatStreams?.[0];
-                    if (fmt?.url) {
-                        console.log(`[P3 SUCCESS] Got stream via ${instance}`);
-                        return res.json({ title: data.data.title || id, streamUrl: fmt.url, expiryInMs: 0 });
-                    }
-                } catch (_) {}
-            }
-        } catch (e) { console.warn(`[P3 FAIL] Invidious: ${e.message}`); }
-
-        throw new Error('All stream providers exhausted.');
-    } catch (err) {
-        console.error('[STREAM CRITICAL]', err.message);
-        res.status(500).json({ error: err.message });
+        } catch (e) {
+            console.warn(`[FAIL] ${instance}: ${e.message}`);
+        }
     }
+
+    // Last resort: Invidious instances
+    const invidiousInstances = [
+        'https://invidious.tiekoetter.com',
+        'https://invidious.projectsegfau.lt',
+        'https://invidious.privacyredirect.com',
+    ];
+
+    for (const instance of invidiousInstances) {
+        try {
+            const { data } = await axios.get(`${instance}/api/v1/videos/${id}`, { timeout: 6000 });
+            const fmt = data?.adaptiveFormats?.find(f => f.type?.includes('audio'))
+                      || data?.formatStreams?.[0];
+            if (fmt?.url) {
+                console.log(`[SUCCESS] Stream via ${instance}`);
+                return res.json({ title: data.title || id, streamUrl: fmt.url, expiryInMs: 0 });
+            }
+        } catch (e) {
+            console.warn(`[FAIL] ${instance}: ${e.message}`);
+        }
+    }
+
+
+    console.error('[STREAM] All providers exhausted for:', id);
+    res.status(500).json({ error: 'Could not extract stream from any provider' });
 });
 
 // Diagnostic Route
 router.get('/debug/status', async (req, res) => {
-    res.json({ time: new Date().toISOString(), nodeVersion: process.version, platform: process.platform, status: 'ok' });
+    // Quick test of primary piped instance
+    try {
+        const test = await axios.get('https://pipedapi.kavin.rocks/streams/dQw4w9WgXcQ', { timeout: 5000 });
+        const ok = !!test.data?.audioStreams?.length;
+        res.json({ time: new Date().toISOString(), pipedWorking: ok, platform: process.platform });
+    } catch(e) {
+        res.json({ time: new Date().toISOString(), pipedWorking: false, error: e.message });
+    }
 });
+
 
 
 // GET: /api/scrape/naasongs?q=movie name
