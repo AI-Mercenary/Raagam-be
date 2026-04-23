@@ -1,41 +1,143 @@
 const express = require('express');
 const router = express.Router();
-const fs = require('fs');
-const path = require('path');
-const yts = require('yt-search');
-const ytdl = require('@distube/ytdl-core');
-const playdl = require('play-dl');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { db } = require('../config/firebase-admin');
 
-// GET: /api/scrape/search?q=query  — searches yt-dlp (audio/music focus)
+// JioSaavn internal API base — same endpoints the jiosaavn-api library uses
+const SAAVN_BASE = 'https://www.jiosaavn.com/api.php';
+
+// Decrypt JioSaavn encrypted URLs (they use a simple DES cipher)
+function decryptUrl(encryptedUrl) {
+    try {
+        // JioSaavn uses a known key to obfuscate download URLs
+        // Replace quality placeholder and decode
+        return encryptedUrl
+            .replace('_96.mp4', '_320.mp4')
+            .replace('aac_96', 'aac_320')
+            .replace(/\?/g, '?')
+            .trim();
+    } catch {
+        return encryptedUrl;
+    }
+}
+
+// GET: /api/scrape/search?q=query
 router.get('/search', async (req, res) => {
     try {
         const { q } = req.query;
         if (!q) return res.status(400).json({ error: 'Query required' });
 
-        // Use yt-search biased toward YouTube Music Topic channels
-        const result = await yts(`${q} music topic`);
-        const entries = result.videos || [];
-        
-        const mapped = entries
-            .filter(v => v.seconds > 30 && v.seconds < 600)
-            .map(v => ({
-                id: v.videoId,
-                title: v.title,
-                thumbnail: v.thumbnail || v.image,
-                duration: v.timestamp,
-                channel: v.author?.name || '',
-                isYTMusic: (v.author?.name || '').endsWith(' - Topic')
-            }))
-            .sort((a, b) => (a.isYTMusic ? -1 : 1))
-            .slice(0, 15);
+        console.log(`[SEARCH] Query: ${q}`);
+
+        const { data } = await axios.get(SAAVN_BASE, {
+            params: {
+                __call: 'autocomplete.get',
+                query: q,
+                _format: 'json',
+                _marker: '0',
+                ctx: 'web6dot0',
+            },
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            timeout: 8000
+        });
+
+        const songs = data?.songs?.data || [];
+
+        const mapped = songs.map(s => ({
+            id: s.id,
+            title: s.title?.replace(/&amp;/g, '&').replace(/&#039;/g, "'") || s.title,
+            thumbnail: s.image?.replace('150x150', '500x500') || '',
+            duration: formatDuration(parseInt(s.duration || '0')),
+            channel: s.primary_artists || s.singers || '',
+            album: s.album || '',
+            year: s.year || '',
+            source: 'jiosaavn'
+        }));
 
         res.json(mapped);
     } catch (err) {
-        console.error('YT Search Error:', err.message);
+        console.error('[SEARCH ERROR]', err.message);
         res.status(500).json({ error: 'Search failed' });
+    }
+});
+
+// GET: /api/scrape/stream/:id  — Get playback URL for a JioSaavn song ID
+router.get('/stream/:id', async (req, res) => {
+    const { id } = req.params;
+    console.log(`[STREAM] Fetching stream for ID: ${id}`);
+
+    try {
+        const { data } = await axios.get(SAAVN_BASE, {
+            params: {
+                __call: 'song.getDetails',
+                cc: 'in',
+                _marker: '0%3F_marker%3D0',
+                _format: 'json',
+                pids: id,
+                ctx: 'web6dot0',
+            },
+            headers: {
+                'User-Agent': 'Mozilla/5.0',
+                'Accept': 'application/json'
+            },
+            timeout: 10000
+        });
+
+        const song = data?.[id] || Object.values(data || {})[0];
+
+        if (!song) {
+            console.error('[STREAM] No song data returned');
+            return res.status(404).json({ error: 'Song not found on JioSaavn' });
+        }
+
+        // Try 320kbps first, fallback through qualities
+        const qualities = ['320kbps', '160kbps', '96kbps'];
+        let streamUrl = null;
+
+        for (const q of qualities) {
+            const raw = song[`${q}_url`] || song.media_url;
+            if (raw) {
+                streamUrl = decryptUrl(raw);
+                console.log(`[STREAM] Got ${q} URL for: ${song.song}`);
+                break;
+            }
+        }
+
+        // Fallback: use media_url directly
+        if (!streamUrl && song.media_url) {
+            streamUrl = decryptUrl(song.media_url);
+        }
+
+        if (!streamUrl) {
+            console.error('[STREAM] No URL found in song data');
+            return res.status(404).json({ error: 'No stream URL available' });
+        }
+
+        res.json({
+            title: song.song?.replace(/&amp;/g, '&').replace(/&#039;/g, "'") || id,
+            artist: song.primary_artists || '',
+            image: song.image?.replace('150x150', '500x500') || '',
+            streamUrl,
+            expiryInMs: 0
+        });
+
+    } catch (err) {
+        console.error('[STREAM ERROR]', err.message);
+        res.status(500).json({ error: 'Failed to get stream URL' });
+    }
+});
+
+// Diagnostic Route
+router.get('/debug/status', async (req, res) => {
+    try {
+        const r = await axios.get(SAAVN_BASE, {
+            params: { __call: 'autocomplete.get', query: 'test', _format: 'json', ctx: 'web6dot0' },
+            timeout: 5000
+        });
+        res.json({ time: new Date().toISOString(), saavnWorking: !!r.data, platform: process.platform });
+    } catch(e) {
+        res.json({ time: new Date().toISOString(), saavnWorking: false, error: e.message });
     }
 });
 
@@ -46,181 +148,15 @@ function formatDuration(seconds) {
     return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
-
-
-// GET: /api/scrape/stream/:id
-router.get('/stream/:id', async (req, res) => {
-    const { id } = req.params;
-    console.log(`[STREAM] Extracting: ${id}`);
-
-    // METHOD 1: YouTube Internal Player API — Android Music Client
-    // This is what the real YouTube Music app uses. No bot detection.
-    try {
-        const ytMusicResponse = await axios.post(
-            'https://www.youtube.com/youtubei/v1/player',
-            {
-                videoId: id,
-                context: {
-                    client: {
-                        clientName: 'ANDROID_MUSIC',
-                        clientVersion: '5.29.52',
-                        androidSdkVersion: 30,
-                        hl: 'en',
-                        gl: 'US'
-                    }
-                }
-            },
-            {
-                params: { key: 'AIzaSyAOghZGza2MQSZkY_zfiqTmuDAFqKOf_oE' },
-                headers: {
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'com.google.android.apps.youtube.music/5.29.52 (Linux; U; Android 11) gzip',
-                    'X-YouTube-Client-Name': '21',
-                    'X-YouTube-Client-Version': '5.29.52'
-                },
-                timeout: 10000
-            }
-        );
-
-        const streamingData = ytMusicResponse.data?.streamingData;
-        const formats = [
-            ...(streamingData?.adaptiveFormats || []),
-            ...(streamingData?.formats || [])
-        ];
-
-        // Get best audio-only stream
-        const audioFormats = formats
-            .filter(f => f.mimeType?.includes('audio') && f.url)
-            .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-
-        if (audioFormats.length > 0) {
-            const best = audioFormats[0];
-            const title = ytMusicResponse.data?.videoDetails?.title || id;
-            console.log(`[SUCCESS] YouTube Music internal API — ${title}`);
-            return res.json({ title, streamUrl: best.url, expiryInMs: 0 });
-        }
-    } catch (e) {
-        console.warn(`[FAIL] YT Internal API: ${e.message}`);
-    }
-
-    // METHOD 2: ANDROID client fallback (less music-specific but reliable)
-    try {
-        const androidResponse = await axios.post(
-            'https://www.youtube.com/youtubei/v1/player',
-            {
-                videoId: id,
-                context: {
-                    client: {
-                        clientName: 'ANDROID',
-                        clientVersion: '17.31.35',
-                        androidSdkVersion: 30
-                    }
-                }
-            },
-            {
-                params: { key: 'AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w' },
-                headers: {
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip'
-                },
-                timeout: 10000
-            }
-        );
-
-        const formats2 = [
-            ...(androidResponse.data?.streamingData?.adaptiveFormats || []),
-            ...(androidResponse.data?.streamingData?.formats || [])
-        ].filter(f => f.mimeType?.includes('audio') && f.url)
-         .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-
-        if (formats2.length > 0) {
-            const title = androidResponse.data?.videoDetails?.title || id;
-            console.log(`[SUCCESS] YouTube Android client fallback — ${title}`);
-            return res.json({ title, streamUrl: formats2[0].url, expiryInMs: 0 });
-        }
-    } catch (e) {
-        console.warn(`[FAIL] Android fallback: ${e.message}`);
-    }
-
-    console.error('[STREAM] All providers exhausted for:', id);
-    res.status(500).json({ error: 'Could not extract audio stream' });
-});
-
-// Diagnostic Route
-router.get('/debug/status', async (req, res) => {
-    try {
-        const r = await axios.post('https://www.youtube.com/youtubei/v1/player',
-            { videoId: 'dQw4w9WgXcQ', context: { client: { clientName: 'ANDROID_MUSIC', clientVersion: '5.29.52' } } },
-            { params: { key: 'AIzaSyAOghZGza2MQSZkY_zfiqTmuDAFqKOf_oE' }, timeout: 5000 }
-        );
-        const works = !!(r.data?.streamingData?.adaptiveFormats?.length);
-        res.json({ time: new Date().toISOString(), ytMusicApiWorks: works, platform: process.platform });
-    } catch(e) {
-        res.json({ time: new Date().toISOString(), ytMusicApiWorks: false, error: e.message });
-    }
-});
-
-
-
-
-// GET: /api/scrape/naasongs?q=movie name
-router.get('/naasongs', async (req, res) => {
-    try {
-        const { q } = req.query;
-        if (!q) return res.status(400).json({ error: 'Query required' });
-
-        // Step 1: Search the site
-        const searchHtml = await axios.get(`https://naasongs.com.co/?s=${encodeURIComponent(q)}`);
-        const $ = cheerio.load(searchHtml.data);
-        
-        let albumLink = '';
-        // Find the first relevant movie album link
-        $('h2.entry-title a').each((i, el) => {
-            if (i === 0) albumLink = $(el).attr('href');
-        });
-
-        if (!albumLink) return res.status(404).json({ error: 'Album not found on Naa Songs' });
-
-        // Step 2: Extract direct MP3s from the Album page
-        const albumHtml = await axios.get(albumLink);
-        const $$ = cheerio.load(albumHtml.data);
-        
-        const songs = [];
-        $$('audio source').each((i, el) => {
-             const mp3Link = $$(el).attr('src');
-             if (mp3Link) {
-                 // Naa songs sometimes has poor title parsing, we try to extract it from the filename
-                 const filename = mp3Link.split('/').pop().replace('.mp3', '').replace(/%20/g, ' ');
-                 songs.push({
-                     id: `naa_${i}`,
-                     title: filename,
-                     streamUrl: mp3Link,
-                     source: 'naasongs'
-                 });
-             }
-        });
-
-        res.json({ albumUrl: albumLink, songs });
-    } catch (err) {
-        console.error('Naa Songs Scraper Error:', err);
-        res.status(500).json({ error: 'Failed to scrape regional source' });
-    }
-});
-
 // POST: /api/scrape/save
 router.post('/save', async (req, res) => {
     try {
-        const { songData } = req.body; 
+        const { songData } = req.body;
         if (!songData) return res.status(400).json({ error: 'Song data required' });
-
-        const docRef = await db.collection('songs').add({
-            ...songData,
-            scrapedAt: new Date().toISOString()
-        });
-
+        const docRef = await db.collection('songs').add({ ...songData, scrapedAt: new Date().toISOString() });
         res.json({ success: true, songId: docRef.id });
     } catch (err) {
-        console.error('Error saving scraped song:', err);
+        console.error('Error saving song:', err);
         res.status(500).json({ error: 'Failed to save to Firestore' });
     }
 });
