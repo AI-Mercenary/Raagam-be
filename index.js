@@ -26,13 +26,13 @@ app.use('/api/user', require('./src/routes/user'));
 app.use('/api/spotify', require('./src/routes/spotify'));
 app.use('/api/scrape', require('./src/routes/scrape'));
 
-// Database Connection
-mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/raagam').then(() => {
-    console.log('MongoDB successfully connected.');
-    app.listen(PORT, () => {
-        console.log(`Raagam Backend Server running on http://localhost:${PORT}`);
-    });
-}).catch(err => {
-    console.error('Database connection failed:', err);
-    process.exit(1);
+// Start Server Immediately
+app.listen(PORT, () => {
+    console.log(`Raagam Backend Server running on port ${PORT}`);
 });
+
+// Database Connection in background
+mongoose.connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/raagam')
+    .then(() => console.log('MongoDB successfully connected.'))
+    .catch(err => console.error('Database connection failed:', err));
+
