@@ -27,6 +27,7 @@ router.get('/search', async (req, res) => {
             thumbnail: s.image?.length > 0 ? s.image[s.image.length - 1].url : '',
             duration: formatDuration(parseInt(s.duration || '0')),
             artist: s.artists?.primary?.map(a => a.name).join(', ') || 'Various Artists',
+            channel: s.artists?.primary?.map(a => a.name).join(', ') || 'Various Artists', // FOR FRONTEND COMPATIBILITY
             album: s.album?.name || '',
             year: s.year || '',
             source: 'jiosaavn'
