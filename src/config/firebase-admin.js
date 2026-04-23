@@ -1,0 +1,21 @@
+const admin = require('firebase-admin');
+const path = require('path');
+
+// Try to load the service account key
+// NOTE: You MUST download this from Firebase Console and place it in E:\Raagam-be\serviceAccountKey.json
+const serviceAccountPath = path.join(__dirname, '../../serviceAccountKey.json');
+
+try {
+    const serviceAccount = require(serviceAccountPath);
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+    });
+    console.log("Firebase Admin initialized successfully.");
+} catch (err) {
+    console.error("Firebase Admin initialization FAILED. Please ensure 'serviceAccountKey.json' exists in the backend root.");
+}
+
+const db = admin.firestore();
+const auth = admin.auth();
+
+module.exports = { db, auth };
