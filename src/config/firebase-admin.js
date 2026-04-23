@@ -8,7 +8,11 @@ const serviceAccountPath = path.join(__dirname, '../../serviceAccountKey.json');
 try {
     let serviceAccount;
     if (process.env.FIREBASE_CREDENTIALS) {
-        serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+        let rawStr = process.env.FIREBASE_CREDENTIALS;
+        if (!rawStr.includes('{')) {
+            rawStr = Buffer.from(rawStr, 'base64').toString('utf8');
+        }
+        serviceAccount = JSON.parse(rawStr);
     } else {
         serviceAccount = require(serviceAccountPath);
     }
