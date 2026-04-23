@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const fs = require('fs');
 const yts = require('yt-search');
 const youtubedl = require('youtube-dl-exec');
 const axios = require('axios');
@@ -52,55 +53,48 @@ router.get('/stream/:id', async (req, res) => {
         const { id } = req.params;
         const binaryPath = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
         
-        console.log(`[STREAM] Attempting extraction for ID: ${id}`);
+        console.log(`[STREAM] Final attempt for ID: ${id}`);
 
+        // Provider 1: Local Binary
         try {
-            // Attempt 1: Local yt-dlp
             const streamInfo = await youtubedl(`https://www.youtube.com/watch?v=${id}`, {
-                dumpJson: true,
-                noCheckCertificates: true,
-                noWarnings: true,
-                format: 'bestaudio',
+                dumpJson: true, noCheckCertificates: true, noWarnings: true, format: 'bestaudio',
                 executablePath: binaryPath
             });
+            if (streamInfo?.url) return res.json({ title: streamInfo.title, streamUrl: streamInfo.url, expiryInMs: 0 });
+        } catch (e) { console.warn(`P1 Fail: ${e.message}`); }
 
-            if (streamInfo && streamInfo.url) {
-                console.log(`[STREAM] Local success for ${id}`);
-                return res.json({ 
-                    title: streamInfo.title,
-                    streamUrl: streamInfo.url,
-                    expiryInMs: 0 
-                });
-            }
-        } catch (localErr) {
-            console.warn(`[STREAM] Local extraction failed for ${id}, trying fallback...`);
-        }
+        // Provider 2: Cobalt API
+        try {
+            const fallback = await axios.post('https://api.cobalt.tools/api/json', {
+                url: `https://www.youtube.com/watch?v=${id}`, downloadMode: 'audio', audioFormat: 'mp3'
+            }, { timeout: 5000 });
+            if (fallback.data?.url) return res.json({ title: `Stream_${id}`, streamUrl: fallback.data.url, expiryInMs: 0 });
+        } catch (e) { console.warn(`P2 Fail: ${e.message}`); }
 
-        // Attempt 2: Public High-Reliability Fallback Proxy
-        // We use cobalt.tools instance or similar public API for extraction
-        const fallbackResponse = await axios.post('https://api.cobalt.tools/api/json', {
-            url: `https://www.youtube.com/watch?v=${id}`,
-            downloadMode: 'audio',
-            audioFormat: 'mp3'
-        }, {
-            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' }
-        });
+        // Provider 3: Backup Extraction Pipe (Simple & Direct)
+        try {
+            const backup = await axios.get(`https://invidious.snopyta.org/api/v1/videos/${id}`);
+            const format = backup.data?.adaptiveFormats?.find(f => f.type.includes('audio')) || backup.data?.formatStreams?.[0];
+            if (format?.url) return res.json({ title: backup.data.title || id, streamUrl: format.url, expiryInMs: 0 });
+        } catch (e) { console.warn(`P3 Fail: ${e.message}`); }
 
-        if (fallbackResponse.data && fallbackResponse.data.url) {
-            console.log(`[STREAM] Fallback success for ${id}`);
-            return res.json({
-                title: `Stream_${id}`,
-                streamUrl: fallbackResponse.data.url,
-                expiryInMs: 0
-            });
-        }
-
-        throw new Error('All extraction methods failed');
-
+        throw new Error('All 3 stream providers failed to extract audio.');
     } catch (err) {
-        console.error('Streaming Extraction Error DETAILS:', err.message);
-        res.status(500).json({ error: 'Failed to extract audio stream from all providers' });
+        console.error('CRITICAL EXTRACTION FAILURE:', err.message);
+        res.status(500).json({ error: err.message });
     }
+});
+
+// Diagnostic Route: Check server health and binary existence
+router.get('/debug/status', async (req, res) => {
+    const binaryPath = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
+    res.json({
+        time: new Date().toISOString(),
+        binaryExists: fs.existsSync(binaryPath),
+        nodeVersion: process.version,
+        platform: process.platform
+    });
 });
 
 // GET: /api/scrape/naasongs?q=movie name
