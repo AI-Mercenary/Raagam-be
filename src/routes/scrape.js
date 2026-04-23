@@ -4,6 +4,7 @@ const yts = require('yt-search');
 const youtubedl = require('youtube-dl-exec');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const path = require('path');
 const { db } = require('../config/firebase-admin');
 
 // GET: /api/scrape/search?q=query  — searches yt-dlp (audio/music focus)
@@ -12,28 +13,21 @@ router.get('/search', async (req, res) => {
         const { q } = req.query;
         if (!q) return res.status(400).json({ error: 'Query required' });
 
-        // ytsearch15: query with 'song' or 'audio' to aggressively bias towards music
-        const result = await youtubedl(`ytsearch15:${q} song audio topic`, {
-            dumpSingleJson: true,
-            flatPlaylist: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            skipDownload: true
-        });
-
-        const entries = result?.entries || (Array.isArray(result) ? result : [result]);
-
+        // Use yt-search (much faster and more reliable for simple search lists)
+        const result = await yts(`${q} audio topic`);
+        const entries = result.videos || [];
+        
         const mapped = entries
-            .filter(v => v && v.id && v.duration && v.duration > 30 && v.duration < 600)
+            .filter(v => v.seconds > 30 && v.seconds < 600)
             .map(v => ({
-                id: v.id,
+                id: v.videoId,
                 title: v.title,
-                thumbnail: v.thumbnail || (v.thumbnails?.[0]?.url ?? ''),
-                duration: formatDuration(v.duration),
-                channel: v.channel || v.uploader || '',
-                isYTMusic: (v.channel || v.uploader || '').endsWith(' - Topic')
+                thumbnail: v.thumbnail || v.image,
+                duration: v.timestamp,
+                channel: v.author?.name || '',
+                isYTMusic: (v.author?.name || '').endsWith(' - Topic')
             }))
-            .sort((a, b) => (a.isYTMusic ? -1 : 1)) // Push YT Music topics to the top
+            .sort((a, b) => (a.isYTMusic ? -1 : 1))
             .slice(0, 15);
 
         res.json(mapped);
@@ -56,17 +50,21 @@ function formatDuration(seconds) {
 router.get('/stream/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        const binaryPath = path.join(__dirname, '../../node_modules/youtube-dl-exec/bin/yt-dlp');
         
-        // Use music.youtube.com — extracts from YouTube Music directly
+        console.log(`Extracting stream for ID: ${id} using binary: ${binaryPath}`);
+        
         const streamInfo = await youtubedl(`https://music.youtube.com/watch?v=${id}`, {
             dumpJson: true,
             noCheckCertificates: true,
             noWarnings: true,
-            format: 'bestaudio'
+            format: 'bestaudio',
+            executablePath: binaryPath // FORCE the use of our manual download
         });
         
         if (!streamInfo || !streamInfo.url) {
-            return res.status(404).json({ error: 'Audio stream completely extracted' });
+            console.error('Extraction failed: No URL in streamInfo');
+            return res.status(404).json({ error: 'Audio stream extraction returned empty' });
         }
         
         res.json({ 
@@ -75,8 +73,8 @@ router.get('/stream/:id', async (req, res) => {
             expiryInMs: 0 
         });
     } catch (err) {
-        console.error('Streaming Extraction Error:', err);
-        res.status(500).json({ error: 'Failed to extract audio stream' });
+        console.error('Streaming Extraction Error DETAILS:', err);
+        res.status(500).json({ error: 'Extraction engine failure. Check logs.' });
     }
 });
 
